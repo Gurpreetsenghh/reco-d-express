@@ -100,24 +100,34 @@ io.on("connection", (socket) => {
       const cloudinaryUrl = uploadResult.secure_url;
 
       if (processing.data.plan === "PRO") {
-        const aiResult = await processAITranscription(filePath);
-        
-        if (aiResult) {
-          const titleAndSummaryGenerated = await axios.post(
-            `${process.env.NEXT_API_HOST}recording/${data.userId}/transcribe`,
-            {
-              filename: data.filename,
-              content: aiResult.content,
-              transcript: aiResult.transcript,
-            }
-          );
+        // ISOLATED TRY-CATCH FOR AI
+        try {
+          const aiResult = await processAITranscription(filePath);
+          
+          if (aiResult) {
+            const titleAndSummaryGenerated = await axios.post(
+              `${process.env.NEXT_API_HOST}recording/${data.userId}/transcribe`,
+              {
+                filename: data.filename,
+                content: aiResult.content,
+                transcript: aiResult.transcript,
+              }
+            );
 
-          if (titleAndSummaryGenerated.status !== 200) {
-            console.log("🔴 Error : Something Went Wrong with transcription title and description");
+            if (titleAndSummaryGenerated.status !== 200) {
+              console.log("🔴 Error : Something Went Wrong with transcription title and description");
+            }
+          }
+        } catch (aiError) {
+          console.error("🔴 AI Processing failed, but proceeding to save video:", aiError.message);
+          // Optional: Emit a warning to the client that AI failed but video is safe
+          if (socket.connected) {
+            socket.emit("ai-processing-error", { message: "Video saved, but AI summary failed." });
           }
         }
       }
 
+      // THIS WILL NOW RUN EVEN IF AI FAILS
       const stopProcessing = await axios.post(
         `${process.env.NEXT_API_HOST}recording/${data.userId}/complete`,
         { 

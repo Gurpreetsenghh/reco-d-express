@@ -4,36 +4,60 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// The SDK automatically picks up process.env.GEMINI_API_KEY
 const ai = new GoogleGenAI({});
+
+const waitForFileProcessing = async (name) => {
+  let file = await ai.files.getFile({ name });
+  while (file.state === "PROCESSING") {
+    console.log("⏳ Waiting for video processing on Gemini servers...");
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    file = await ai.files.getFile({ name });
+  }
+  if (file.state === "FAILED") {
+    throw new Error("Video processing failed on Gemini servers.");
+  }
+  return file;
+};
 
 export const processAITranscription = async (filePath) => {
   let uploadedFile = null;
 
   try {
-    // 1. Verify file exists
     await fs.promises.stat(filePath);
 
     console.log("🟢 Initiating Gemini processing...");
 
-    // 2. Upload file to Gemini's File API 
-    // This allows processing large audio/video files directly.
-    uploadedFile = await ai.files.upload({ file: filePath });
+    uploadedFile = await ai.files.upload({ 
+      file: filePath,
+      mimeType: "video/webm" 
+    });
     console.log(`🟢 File uploaded to Gemini: ${uploadedFile.uri}`);
 
-    // 3. Define the prompt for the multimodal task
+    await waitForFileProcessing(uploadedFile.name);
+
     const prompt = `Process the speech in this media file.
 1. Generate a complete and highly accurate transcript.
 2. Based on the transcript, create a suitable title.
 3. Based on the transcript, create a concise summary.
 Return the output EXACTLY as a JSON object with the following keys: "title", "summary", and "transcript".`;
 
-    // 4. Generate transcript and summary in a single pass
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: [uploadedFile, prompt],
+      contents: [{
+        role: "user",
+        parts: [
+          {
+            fileData: {
+              fileUri: uploadedFile.uri,
+              mimeType: uploadedFile.mimeType
+            }
+          },
+          {
+            text: prompt
+          }
+        ]
+      }],
       config: {
-        // Enforce a strict JSON response
         responseMimeType: "application/json",
       },
     });
@@ -41,7 +65,6 @@ Return the output EXACTLY as a JSON object with the following keys: "title", "su
     const parsedData = JSON.parse(response.text);
     console.log("🟢 Gemini processing complete.");
 
-    // 5. Map the output to match the exact shape server.js already expects
     return {
       transcript: parsedData.transcript,
       content: JSON.stringify({
@@ -52,9 +75,8 @@ Return the output EXACTLY as a JSON object with the following keys: "title", "su
 
   } catch (error) {
     console.error("🔴 Gemini Processing Error:", error);
-    throw error; // Let the caller handle the rejection
+    throw error; 
   } finally {
-    // 6. Guarantee cleanup of the remote file to avoid hitting storage quotas
     if (uploadedFile) {
       try {
         await ai.files.delete({ name: uploadedFile.name });
