@@ -9,9 +9,8 @@ import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// Import Refactored Services
 import { uploadVideoToCloudinary } from "./services/cloudinaryService.js";
-import { processAITranscription } from "./services/openaiService.js";
+import { processAITranscription } from "./services/geminiService.js";
 
 dotenv.config();
 
@@ -28,6 +27,9 @@ const io = new Server(server, {
     origin: "*",
     methods: ["GET", "POST"],
   },
+  maxHttpBufferSize: 1e8, 
+  pingTimeout: 60000,     
+  pingInterval: 25000,
 });
 
 const uploadDir = path.join(__dirname, "temp_upload");
@@ -38,6 +40,8 @@ if (!fs.existsSync(uploadDir)) {
 io.on("connection", (socket) => {
   console.log("🟢 Socket connected:", socket.id);
   socket.emit("connected");
+  
+  let isProcessing = false;
 
   socket.on("video-chunks", async (data) => {
     try {
@@ -66,18 +70,22 @@ io.on("connection", (socket) => {
   });
 
   socket.on("process-video", async (data) => {
+    if (!socket.connected) {
+      console.warn("🟡 Aborted processing: Socket is already disconnected.");
+      return;
+    }
+
     const filePath = path.join(uploadDir, data.filename);
 
     try {
+      isProcessing = true;
       console.log("🟢 Processing video:", data.filename);
 
-      // 1. Verify file exists
       console.log("🟢 Came on File Check");
       if (!fs.existsSync(filePath)) {
         throw new Error("Video file not found");
       }
 
-      // 2. Start processing status on Backend
       console.log("🟢 Came on processing");
       const processing = await axios.post(
         `${process.env.NEXT_API_HOST}recording/${data.userId}/processing`,
@@ -88,12 +96,9 @@ io.on("connection", (socket) => {
         throw new Error("Failed to create processing file");
       }
 
-      // 3. Upload to Cloudinary
       const uploadResult = await uploadVideoToCloudinary(filePath, data.filename);
       const cloudinaryUrl = uploadResult.secure_url;
 
-
-      // 4. Handle AI Transcription if PRO plan
       if (processing.data.plan === "PRO") {
         const aiResult = await processAITranscription(filePath);
         
@@ -107,30 +112,31 @@ io.on("connection", (socket) => {
             }
           );
 
-          if (titleAndSummaryGenerated.data.status !== 200) {
+          if (titleAndSummaryGenerated.status !== 200) {
             console.log("🔴 Error : Something Went Wrong with transcription title and description");
           }
         }
       }
 
-      // 5. Complete processing status on Backend
       const stopProcessing = await axios.post(
         `${process.env.NEXT_API_HOST}recording/${data.userId}/complete`,
         { 
           filename: data.filename,
           videoUrl: cloudinaryUrl,
-
          }
       );
 
-      if (stopProcessing.data.status !== 200) {
+      if (stopProcessing.status !== 200) {
         throw new Error("Failed to complete processing");
       }
 
     } catch (error) {
       console.error("🔴 Error processing video:", error);
+      if (socket.connected) {
+        socket.emit("processing-error", { message: "Failed to complete processing" });
+      }
     } finally {
-      // 6. Clean up file regardless of success or failure
+      isProcessing = false;
       if (fs.existsSync(filePath)) {
         fs.unlink(filePath, (err) => {
           if (err) {
@@ -143,8 +149,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("disconnect", () => {
-    console.log("🔴 Socket disconnected:", socket.id);
+  socket.on("disconnect", (reason) => {
+    console.log(`🔴 Socket disconnected: ${socket.id} due to ${reason}`);
+    if (isProcessing) {
+      console.warn("🟡 Socket disconnected mid-processing. Cleaning up resource allocation...");
+    }
   });
 });
 
